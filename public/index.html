@@ -1,43 +1,355 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <link rel="icon" href="%PUBLIC_URL%/favicon.ico" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#000000" />
-    <meta
-      name="description"
-      content="Web site created using create-react-app"
-    />
-    <link rel="apple-touch-icon" href="%PUBLIC_URL%/logo192.png" />
-    <!--
-      manifest.json provides metadata used when your web app is installed on a
-      user's mobile device or desktop. See https://developers.google.com/web/fundamentals/web-app-manifest/
-    -->
-    <link rel="manifest" href="%PUBLIC_URL%/manifest.json" />
-    <!--
-      Notice the use of %PUBLIC_URL% in the tags above.
-      It will be replaced with the URL of the `public` folder during the build.
-      Only files inside the `public` folder can be referenced from the HTML.
-
-      Unlike "/favicon.ico" or "favicon.ico", "%PUBLIC_URL%/favicon.ico" will
-      work correctly both with client-side routing and a non-root public URL.
-      Learn how to configure a non-root public URL by running `npm run build`.
-    -->
-    <title>React App</title>
-  </head>
-  <body>
-    <noscript>You need to enable JavaScript to run this app.</noscript>
-    <div id="root"></div>
-    <!--
-      This HTML file is a template.
-      If you open it directly in the browser, you will see an empty page.
-
-      You can add webfonts, meta tags, or analytics to this file.
-      The build step will place the bundled scripts into the <body> tag.
-
-      To begin the development, run `npm start` or `yarn start`.
-      To create a production bundle, use `npm run build` or `yarn build`.
-    -->
-  </body>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#000000">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Pose Estimation</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    html, body {
+      height: 100%;
+      width: 100%;
+      overflow: hidden;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+      background-color: #000;
+    }
+    
+    .video-container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+    }
+    
+    #input-video {
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      opacity: 0;
+    }
+    
+    #output-canvas {
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    
+    .status-bar {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      right: 20px;
+      background-color: rgba(0, 0, 0, 0.7);
+      color: white;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 14px;
+      text-align: center;
+      z-index: 100;
+    }
+    
+    .loading-screen {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #000;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      color: white;
+      z-index: 9999;
+    }
+    
+    .loading-spinner {
+      width: 50px;
+      height: 50px;
+      border: 3px solid rgba(255,255,255,0.3);
+      border-radius: 50%;
+      border-top-color: #fff;
+      animation: spin 1s ease-in-out infinite;
+      margin-bottom: 20px;
+    }
+    
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div class="video-container">
+    <video id="input-video" playsinline></video>
+    <canvas id="output-canvas"></canvas>
+  </div>
+  
+  <div class="status-bar" id="status-bar">
+    Initializing camera...
+  </div>
+  
+  <div class="loading-screen" id="loading-screen">
+    <div class="loading-spinner"></div>
+    <div>Loading Pose Estimation...</div>
+  </div>
+  
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  
+  <script>
+    // Global variables
+    let camera = null;
+    let pose = null;
+    
+    // DOM elements
+    const videoElement = document.getElementById('input-video');
+    const canvasElement = document.getElementById('output-canvas');
+    const statusBar = document.getElementById('status-bar');
+    const loadingScreen = document.getElementById('loading-screen');
+    
+    // Helper function to update status
+    function setStatus(message) {
+      statusBar.textContent = message;
+    }
+    
+    // Helper function to calculate angle between three points
+    function calculateAngle(p1, p2, p3) {
+      if (!p1 || !p2 || !p3) return null;
+      
+      const radians = Math.atan2(p3.y - p2.y, p3.x - p2.x) - Math.atan2(p1.y - p2.y, p1.x - p2.x);
+      let angle = Math.abs(radians * 180.0 / Math.PI);
+      
+      if (angle > 180.0) {
+        angle = 360 - angle;
+      }
+      
+      return angle;
+    }
+    
+    // Check tracking conditions
+    function checkTrackingConditions(poseLandmarks) {
+      if (!poseLandmarks) return false;
+      
+      // Get tracking configuration from URL parameters if available
+      const urlParams = new URLSearchParams(window.location.search);
+      const trackingConfig = {
+        num_angle: parseInt(urlParams.get('num_angle') || '1'),
+        angleFalse: parseFloat(urlParams.get('angleFalse') || '133'),
+        angleTrue: parseFloat(urlParams.get('angleTrue') || '150'),
+        condFalse: urlParams.get('condFalse') || '<',
+        condTrue: urlParams.get('condTrue') || '>'
+      };
+      
+      // Calculate left elbow angle (shoulder, elbow, wrist)
+      const leftShoulderLandmark = poseLandmarks[11]; // Left shoulder
+      const leftElbowLandmark = poseLandmarks[13];    // Left elbow
+      const leftWristLandmark = poseLandmarks[15];    // Left wrist
+      
+      const leftElbowAngle = calculateAngle(
+        leftShoulderLandmark, 
+        leftElbowLandmark, 
+        leftWristLandmark
+      );
+      
+      // Calculate right elbow angle (shoulder, elbow, wrist)
+      const rightShoulderLandmark = poseLandmarks[12]; // Right shoulder
+      const rightElbowLandmark = poseLandmarks[14];    // Right elbow
+      const rightWristLandmark = poseLandmarks[16];    // Right wrist
+      
+      const rightElbowAngle = calculateAngle(
+        rightShoulderLandmark, 
+        rightElbowLandmark, 
+        rightWristLandmark
+      );
+      
+      // Determine if conditions are met based on tracking configuration
+      let angle = leftElbowAngle || rightElbowAngle;
+      let conditionsMet = false;
+      
+      if (trackingConfig.condTrue === ">" && angle > trackingConfig.angleTrue) {
+        conditionsMet = true;
+      } else if (trackingConfig.condTrue === "<" && angle < trackingConfig.angleTrue) {
+        conditionsMet = true;
+      }
+      
+      // Send result to React Native if in a WebView
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'TRACKING_RESULT',
+          data: {
+            conditionsMet,
+            angle,
+            threshold: trackingConfig.angleTrue
+          }
+        }));
+      }
+      
+      // Also send raw pose data for custom processing in React Native
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'POSE_DATA',
+          data: poseLandmarks
+        }));
+      }
+      
+      return conditionsMet;
+    }
+    
+    // Initialize pose detection
+    async function initializePose() {
+      try {
+        setStatus('Initializing camera...');
+        
+        // Set canvas dimensions
+        canvasElement.width = window.innerWidth;
+        canvasElement.height = window.innerHeight;
+        
+        const ctx = canvasElement.getContext('2d');
+        
+        // Resize canvas when window size changes
+        window.addEventListener('resize', () => {
+          canvasElement.width = window.innerWidth;
+          canvasElement.height = window.innerHeight;
+        });
+        
+        // Handle pose detection results
+        const onResults = (results) => {
+          // Clear canvas
+          ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+          
+          // Draw video frame as background
+          ctx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+          
+          // Draw pose landmarks
+          if (results.poseLandmarks) {
+            // Draw connections
+            drawConnectors(ctx, results.poseLandmarks, POSE_CONNECTIONS, 
+              { color: 'rgba(0, 255, 0, 0.8)', lineWidth: 3 });
+            
+            // Draw landmarks
+            drawLandmarks(ctx, results.poseLandmarks, 
+              { color: 'rgba(255, 0, 0, 0.8)', lineWidth: 1.5, radius: 4 });
+            
+            // Check tracking conditions
+            checkTrackingConditions(results.poseLandmarks);
+          }
+        };
+        
+        // Initialize MediaPipe Pose
+        pose = new Pose({
+          locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+          }
+        });
+        
+        // Set pose options - lower complexity for better performance
+        pose.setOptions({
+          modelComplexity: 0,
+          smoothLandmarks: true,
+          enableSegmentation: false,
+          minDetectionConfidence: 0.6,
+          minTrackingConfidence: 0.5
+        });
+        
+        pose.onResults(onResults);
+        
+        // Initialize camera
+        camera = new Camera(videoElement, {
+          onFrame: async () => {
+            await pose.send({ image: videoElement });
+          },
+          width: 640,
+          height: 480
+        });
+        
+        // Start the camera
+        await camera.start();
+        console.log('Camera started successfully');
+        setStatus('Pose detection active');
+        
+        // Hide loading screen
+        loadingScreen.style.display = 'none';
+        
+        // Notify React Native that we're ready
+        if (window.ReactNativeWebView) {
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'WEBVIEW_LOADED'
+          }));
+        }
+        
+      } catch (error) {
+        console.error('Error initializing pose detection:', error);
+        setStatus(`Error: ${error.message}. Try reloading the page.`);
+        loadingScreen.style.display = 'none';
+      }
+    }
+    
+    // Prevent context menu on right-click and long-press
+    document.addEventListener('contextmenu', function(e) {
+      e.preventDefault();
+    });
+    
+    // Prevent pinch zoom on mobile
+    document.addEventListener('touchmove', function(e) {
+      if (e.scale !== 1) {
+        e.preventDefault();
+      }
+    }, { passive: false });
+    
+    // Listen for messages from React Native
+    window.addEventListener('message', (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        
+        if (message.type === 'SET_TRACKING') {
+          console.log('Received tracking config:', message.data);
+          // Update tracking configuration if needed
+        }
+      } catch (e) {
+        console.error('Error parsing message from React Native:', e);
+      }
+    });
+    
+    // Check WebRTC support
+    function isWebRTCSupported() {
+      return navigator.mediaDevices && 
+             navigator.mediaDevices.getUserMedia && 
+             window.RTCPeerConnection;
+    }
+    
+    // Initialize when the page loads
+    document.addEventListener('DOMContentLoaded', function() {
+      if (!isWebRTCSupported()) {
+        loadingScreen.innerHTML = `
+          <div style="padding: 20px; color: white; text-align: center;">
+            <h3>Error: WebRTC Not Supported</h3>
+            <p>Your browser doesn't support camera access required for this app.</p>
+            <p>Please try Chrome, Safari, Edge, or Firefox.</p>
+          </div>
+        `;
+      } else {
+        // Initialize pose detection
+        initializePose();
+      }
+    });
+  </script>
+</body>
 </html>
