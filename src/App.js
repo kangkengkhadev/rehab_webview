@@ -1,3 +1,4 @@
+// โค้ด WebView ที่ปรับปรุงแล้ว (App.js)
 import React, { useRef, useEffect, useState } from 'react';
 import './App.css';
 
@@ -7,9 +8,37 @@ function App() {
   const [poseData, setPoseData] = useState(null);
   const [status, setStatus] = useState('Starting camera...');
   const [error, setError] = useState(null);
+  const [trackingConfig, setTrackingConfig] = useState(null);
+  const [focusPoints, setFocusPoints] = useState(null);
 
   // Load MediaPipe scripts when component mounts
   useEffect(() => {
+    // ดึง tracking configuration จาก URL parameters
+    const urlParams = new URLSearchParams(window.location.search);
+    
+    // ตั้งค่า tracking configuration เริ่มต้น
+    const defaultConfig = {
+      num_angle: parseInt(urlParams.get('num_angle') || '1'),
+      angleFalse: parseFloat(urlParams.get('angleFalse') || '120'),
+      angleTrue: parseFloat(urlParams.get('angleTrue') || '150'),
+      condFalse: urlParams.get('condFalse') || '<',
+      condTrue: urlParams.get('condTrue') || '>'
+    };
+    
+    // พยายามดึงค่า focusPoints จาก URL parameters
+    try {
+      const focusPointsParam = urlParams.get('focusPoints');
+      if (focusPointsParam) {
+        const parsedFocusPoints = JSON.parse(decodeURIComponent(focusPointsParam));
+        console.log('Found focusPoints in URL:', parsedFocusPoints);
+        setFocusPoints(parsedFocusPoints);
+      }
+    } catch (error) {
+      console.error('Error parsing focusPoints from URL:', error);
+    }
+    
+    setTrackingConfig(defaultConfig);
+    
     const loadScripts = async () => {
       try {
         // MediaPipe library scripts
@@ -56,9 +85,17 @@ function App() {
     };
     
     loadScripts();
+    
+    // แจ้งเตือน React Native ว่า WebView โหลดเสร็จแล้ว
+    if (window.ReactNativeWebView) {
+      window.ReactNativeWebView.postMessage(JSON.stringify({
+        type: 'WEBVIEW_LOADED'
+      }));
+    }
+    
   }, []);
 
-  // Calculate angle between three points
+  // ฟังก์ชันคำนวณมุมระหว่าง 3 จุด
   const calculateAngle = (p1, p2, p3) => {
     if (!p1 || !p2 || !p3) return null;
     
@@ -72,65 +109,141 @@ function App() {
     return angle;
   };
 
-  // Check tracking conditions based on current pose
-  const checkTrackingConditions = (poseLandmarks) => {
-    if (!poseLandmarks) return false;
-
-    // Get tracking configuration from URL parameters if available
-    const urlParams = new URLSearchParams(window.location.search);
-    const trackingConfig = {
-      num_angle: parseInt(urlParams.get('num_angle') || '1'),
-      angleFalse: parseFloat(urlParams.get('angleFalse') || '133'),
-      angleTrue: parseFloat(urlParams.get('angleTrue') || '150'),
-      condFalse: urlParams.get('condFalse') || '<',
-      condTrue: urlParams.get('condTrue') || '>'
-    };
-
-    // Calculate left elbow angle (shoulder, elbow, wrist)
-    const leftShoulderLandmark = poseLandmarks[11]; // Left shoulder
-    const leftElbowLandmark = poseLandmarks[13];    // Left elbow
-    const leftWristLandmark = poseLandmarks[15];    // Left wrist
+  // ฟังก์ชันวิเคราะห์มุมตามจุดเป้าหมายที่กำหนด
+  const analyzeAngleForFocusPoint = (poseLandmarks, focusPoint) => {
+    if (!poseLandmarks || !focusPoint || !focusPoint.points || focusPoint.points.length < 3) {
+      return null;
+    }
     
-    const leftElbowAngle = calculateAngle(
-      leftShoulderLandmark, 
-      leftElbowLandmark, 
-      leftWristLandmark
+    // นำจุดที่กำหนดมาใช้ในการคำนวณมุม
+    const p1Index = focusPoint.points[0];
+    const p2Index = focusPoint.points[1];
+    const p3Index = focusPoint.points[2];
+    
+    // ตรวจสอบว่ามีจุดครบหรือไม่
+    if (!poseLandmarks[p1Index] || !poseLandmarks[p2Index] || !poseLandmarks[p3Index]) {
+      return null;
+    }
+    
+    // คำนวณมุม
+    const angle = calculateAngle(
+      poseLandmarks[p1Index],
+      poseLandmarks[p2Index],
+      poseLandmarks[p3Index]
     );
     
-    // Calculate right elbow angle (shoulder, elbow, wrist)
-    const rightShoulderLandmark = poseLandmarks[12]; // Right shoulder
-    const rightElbowLandmark = poseLandmarks[14];    // Right elbow
-    const rightWristLandmark = poseLandmarks[16];    // Right wrist
+    // ตรวจสอบเงื่อนไข
+    const threshold = focusPoint.threshold || trackingConfig.angleTrue;
+    const condition = focusPoint.condition || trackingConfig.condTrue;
     
-    const rightElbowAngle = calculateAngle(
-      rightShoulderLandmark, 
-      rightElbowLandmark, 
-      rightWristLandmark
-    );
-    
-    // Determine if conditions are met based on tracking configuration
-    let angle = leftElbowAngle || rightElbowAngle;
     let conditionsMet = false;
-    
-    if (trackingConfig.condTrue === ">" && angle > trackingConfig.angleTrue) {
+    if (condition === ">" && angle > threshold) {
       conditionsMet = true;
-    } else if (trackingConfig.condTrue === "<" && angle < trackingConfig.angleTrue) {
+    } else if (condition === "<" && angle < threshold) {
       conditionsMet = true;
     }
     
-    // Send result to React Native if in a WebView
+    return {
+      angle,
+      conditionsMet,
+      pointIndices: [p1Index, p2Index, p3Index],
+      name: focusPoint.name || 'unnamed'
+    };
+  };
+
+  // Check tracking conditions based on current pose
+  const checkTrackingConditions = (poseLandmarks) => {
+    if (!poseLandmarks) return false;
+    
+    let result = null;
+    
+    // ถ้ามี focusPoints ที่กำหนดไว้ ใช้จุดเหล่านั้นในการวิเคราะห์
+    if (focusPoints && focusPoints.length > 0) {
+      console.log('Using custom focus points:', focusPoints);
+      
+      // วิเคราะห์มุมสำหรับแต่ละจุดเป้าหมาย
+      const results = focusPoints.map(focusPoint => 
+        analyzeAngleForFocusPoint(poseLandmarks, focusPoint)
+      ).filter(result => result !== null);
+      
+      // เลือกผลลัพธ์แรกที่มีค่า
+      if (results.length > 0) {
+        result = results[0];
+        console.log(`Angle for ${result.name}: ${result.angle}°, conditions met: ${result.conditionsMet}`);
+      }
+    } 
+    // ถ้าไม่มี focusPoints ที่กำหนดไว้ ใช้วิธีดีฟอลต์ (ข้อศอก)
+    else {
+      console.log('Using default elbow focus points');
+      
+      // คำนวณมุมข้อศอกซ้าย (ไหล่, ข้อศอก, ข้อมือ)
+      const leftShoulderLandmark = poseLandmarks[11]; // Left shoulder
+      const leftElbowLandmark = poseLandmarks[13];    // Left elbow
+      const leftWristLandmark = poseLandmarks[15];    // Left wrist
+      
+      const leftElbowAngle = calculateAngle(
+        leftShoulderLandmark, 
+        leftElbowLandmark, 
+        leftWristLandmark
+      );
+      
+      // คำนวณมุมข้อศอกขวา (ไหล่, ข้อศอก, ข้อมือ)
+      const rightShoulderLandmark = poseLandmarks[12]; // Right shoulder
+      const rightElbowLandmark = poseLandmarks[14];    // Right elbow
+      const rightWristLandmark = poseLandmarks[16];    // Right wrist
+      
+      const rightElbowAngle = calculateAngle(
+        rightShoulderLandmark, 
+        rightElbowLandmark, 
+        rightWristLandmark
+      );
+      
+      // ใช้มุมใดมุมหนึ่งที่มีค่า
+      let angle = leftElbowAngle || rightElbowAngle;
+      let conditionsMet = false;
+      
+      // ตรวจสอบเงื่อนไขตาม tracking configuration
+      if (trackingConfig.condTrue === ">" && angle > trackingConfig.angleTrue) {
+        conditionsMet = true;
+      } else if (trackingConfig.condTrue === "<" && angle < trackingConfig.angleTrue) {
+        conditionsMet = true;
+      }
+      
+      result = {
+        angle,
+        conditionsMet,
+        name: 'elbow',
+        pointIndices: leftElbowAngle ? [11, 13, 15] : [12, 14, 16]
+      };
+      
+      console.log(`Default elbow angle: ${result.angle}°, conditions met: ${result.conditionsMet}`);
+    }
+    
+    // ถ้าไม่มีผลลัพธ์ ส่งค่าดีฟอลต์
+    if (!result) {
+      console.warn('No valid angle could be calculated');
+      return {
+        conditionsMet: false,
+        angle: 0,
+        threshold: trackingConfig.angleTrue
+      };
+    }
+    
+    // ส่งผลลัพธ์ไปยัง React Native
     if (window.ReactNativeWebView) {
       window.ReactNativeWebView.postMessage(JSON.stringify({
         type: 'TRACKING_RESULT',
         data: {
-          conditionsMet,
-          angle,
-          threshold: trackingConfig.angleTrue
+          conditionsMet: result.conditionsMet,
+          angle: result.angle,
+          threshold: trackingConfig.angleTrue,
+          name: result.name,
+          pointIndices: result.pointIndices
         }
       }));
     }
     
-    // Also send raw pose data for custom processing in React Native
+    // ส่งข้อมูล pose ดิบไปยัง React Native (สำหรับการประมวลผลเพิ่มเติม)
     if (window.ReactNativeWebView) {
       window.ReactNativeWebView.postMessage(JSON.stringify({
         type: 'POSE_DATA',
@@ -138,7 +251,7 @@ function App() {
       }));
     }
     
-    return conditionsMet;
+    return result.conditionsMet;
   };
   
   // Initialize pose detection
@@ -216,6 +329,44 @@ function App() {
           
           // Check tracking conditions
           checkTrackingConditions(results.poseLandmarks);
+          
+          // ถ้ามี focusPoints ให้วาดเส้นที่เชื่อมต่อระหว่างจุดด้วยสีที่เด่นชัด
+          if (focusPoints && focusPoints.length > 0) {
+            focusPoints.forEach(focusPoint => {
+              if (focusPoint.points && focusPoint.points.length >= 3) {
+                const p1 = results.poseLandmarks[focusPoint.points[0]];
+                const p2 = results.poseLandmarks[focusPoint.points[1]];
+                const p3 = results.poseLandmarks[focusPoint.points[2]];
+                
+                if (p1 && p2 && p3) {
+                  // วาดเส้นที่เชื่อมต่อระหว่างจุดด้วยสีที่เด่นชัด (น้ำเงิน)
+                  ctx.beginPath();
+                  ctx.moveTo(p1.x * canvas.width, p1.y * canvas.height);
+                  ctx.lineTo(p2.x * canvas.width, p2.y * canvas.height);
+                  ctx.lineTo(p3.x * canvas.width, p3.y * canvas.height);
+                  ctx.strokeStyle = 'rgba(0, 0, 255, 0.9)';
+                  ctx.lineWidth = 5;
+                  ctx.stroke();
+                  
+                  // วาดวงกลมที่จุดทั้งสามให้ใหญ่กว่าปกติเพื่อให้เห็นชัดเจน
+                  ctx.beginPath();
+                  ctx.arc(p1.x * canvas.width, p1.y * canvas.height, 8, 0, 2 * Math.PI);
+                  ctx.fillStyle = 'rgba(0, 0, 255, 0.9)';
+                  ctx.fill();
+                  
+                  ctx.beginPath();
+                  ctx.arc(p2.x * canvas.width, p2.y * canvas.height, 8, 0, 2 * Math.PI);
+                  ctx.fillStyle = 'rgba(0, 0, 255, 0.9)';
+                  ctx.fill();
+                  
+                  ctx.beginPath();
+                  ctx.arc(p3.x * canvas.width, p3.y * canvas.height, 8, 0, 2 * Math.PI);
+                  ctx.fillStyle = 'rgba(0, 0, 255, 0.9)';
+                  ctx.fill();
+                }
+              }
+            });
+          }
         }
         
         ctx.restore();
@@ -253,21 +404,39 @@ function App() {
       console.log('Camera started successfully');
       setStatus('Detecting poses...');
       
-      // Listen for messages from React Native
+      // รับข้อความจาก React Native
       window.addEventListener('message', (event) => {
         try {
-          const message = JSON.parse(event.data);
+          const message = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
           
           if (message.type === 'SET_TRACKING') {
-            console.log('Received tracking config:', message.data);
-            // Update tracking configuration if needed
+            console.log('Received tracking config from React Native:', message.data);
+            
+            // อัพเดท tracking configuration
+            setTrackingConfig(prev => ({
+              ...prev,
+              ...message.data
+            }));
+            
+            // ถ้ามี focusPoints ให้อัพเดท
+            if (message.data.focusPoints && Array.isArray(message.data.focusPoints)) {
+              console.log('Updating focus points:', message.data.focusPoints);
+              setFocusPoints(message.data.focusPoints);
+            }
+          } else if (message.type === 'START_CAMERA') {
+            console.log('Received START_CAMERA command');
+          } else if (message.type === 'STOP_CAMERA') {
+            console.log('Received STOP_CAMERA command');
+            camera.stop().catch(e => console.error('Error stopping camera:', e));
+          } else if (message.type === 'PAUSE_TRACKING') {
+            console.log('Received PAUSE_TRACKING command:', message.pause);
           }
         } catch (e) {
-          console.error('Error parsing message from React Native:', e);
+          console.error('Error handling message from React Native:', e);
         }
       });
       
-      // Notify React Native that we're ready
+      // แจ้ง React Native ว่าพร้อมแล้ว
       if (window.ReactNativeWebView) {
         window.ReactNativeWebView.postMessage(JSON.stringify({
           type: 'WEBVIEW_LOADED'
@@ -278,6 +447,14 @@ function App() {
       console.error('Error initializing pose detection:', error);
       setStatus('Error');
       setError(`${error.message}. Try reloading the page.`);
+      
+      // แจ้ง React Native ว่ามีข้อผิดพลาด
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'CAMERA_ERROR',
+          error: error.message
+        }));
+      }
     }
   };
 
