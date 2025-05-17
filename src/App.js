@@ -1,4 +1,4 @@
-// โค้ด WebView ที่ปรับปรุงแล้ว (App.js)
+// โค้ด WebView ที่ปรับปรุงแล้ว (App.js) - ทำหน้าที่แค่ส่ง Pose Keypoints
 import React, { useRef, useEffect, useState } from 'react';
 import './App.css';
 
@@ -8,36 +8,14 @@ function App() {
   const [poseData, setPoseData] = useState(null);
   const [status, setStatus] = useState('Starting camera...');
   const [error, setError] = useState(null);
-  const [trackingConfig, setTrackingConfig] = useState(null);
   const [focusPoints, setFocusPoints] = useState(null);
+  const [isPaused, setIsPaused] = useState(false);
 
   // Load MediaPipe scripts when component mounts
   useEffect(() => {
-    // ดึง tracking configuration จาก URL parameters
+    // ดึงชื่อท่าจาก URL parameters (ถ้ามี)
     const urlParams = new URLSearchParams(window.location.search);
-    
-    // ตั้งค่า tracking configuration เริ่มต้น
-    const defaultConfig = {
-      num_angle: parseInt(urlParams.get('num_angle') || '1'),
-      angleFalse: parseFloat(urlParams.get('angleFalse') || '120'),
-      angleTrue: parseFloat(urlParams.get('angleTrue') || '150'),
-      condFalse: urlParams.get('condFalse') || '<',
-      condTrue: urlParams.get('condTrue') || '>'
-    };
-    
-    // พยายามดึงค่า focusPoints จาก URL parameters
-    try {
-      const focusPointsParam = urlParams.get('focusPoints');
-      if (focusPointsParam) {
-        const parsedFocusPoints = JSON.parse(decodeURIComponent(focusPointsParam));
-        console.log('Found focusPoints in URL:', parsedFocusPoints);
-        setFocusPoints(parsedFocusPoints);
-      }
-    } catch (error) {
-      console.error('Error parsing focusPoints from URL:', error);
-    }
-    
-    setTrackingConfig(defaultConfig);
+    const exerciseName = urlParams.get('exercise') || '';
     
     const loadScripts = async () => {
       try {
@@ -94,165 +72,6 @@ function App() {
     }
     
   }, []);
-
-  // ฟังก์ชันคำนวณมุมระหว่าง 3 จุด
-  const calculateAngle = (p1, p2, p3) => {
-    if (!p1 || !p2 || !p3) return null;
-    
-    const radians = Math.atan2(p3.y - p2.y, p3.x - p2.x) - Math.atan2(p1.y - p2.y, p1.x - p2.x);
-    let angle = Math.abs(radians * 180.0 / Math.PI);
-    
-    if (angle > 180.0) {
-      angle = 360 - angle;
-    }
-    
-    return angle;
-  };
-
-  // ฟังก์ชันวิเคราะห์มุมตามจุดเป้าหมายที่กำหนด
-  const analyzeAngleForFocusPoint = (poseLandmarks, focusPoint) => {
-    if (!poseLandmarks || !focusPoint || !focusPoint.points || focusPoint.points.length < 3) {
-      return null;
-    }
-    
-    // นำจุดที่กำหนดมาใช้ในการคำนวณมุม
-    const p1Index = focusPoint.points[0];
-    const p2Index = focusPoint.points[1];
-    const p3Index = focusPoint.points[2];
-    
-    // ตรวจสอบว่ามีจุดครบหรือไม่
-    if (!poseLandmarks[p1Index] || !poseLandmarks[p2Index] || !poseLandmarks[p3Index]) {
-      return null;
-    }
-    
-    // คำนวณมุม
-    const angle = calculateAngle(
-      poseLandmarks[p1Index],
-      poseLandmarks[p2Index],
-      poseLandmarks[p3Index]
-    );
-    
-    // ตรวจสอบเงื่อนไข
-    const threshold = focusPoint.threshold || trackingConfig.angleTrue;
-    const condition = focusPoint.condition || trackingConfig.condTrue;
-    
-    let conditionsMet = false;
-    if (condition === ">" && angle > threshold) {
-      conditionsMet = true;
-    } else if (condition === "<" && angle < threshold) {
-      conditionsMet = true;
-    }
-    
-    return {
-      angle,
-      conditionsMet,
-      pointIndices: [p1Index, p2Index, p3Index],
-      name: focusPoint.name || 'unnamed'
-    };
-  };
-
-  // Check tracking conditions based on current pose
-  const checkTrackingConditions = (poseLandmarks) => {
-    if (!poseLandmarks) return false;
-    
-    let result = null;
-    
-    // ถ้ามี focusPoints ที่กำหนดไว้ ใช้จุดเหล่านั้นในการวิเคราะห์
-    if (focusPoints && focusPoints.length > 0) {
-      console.log('Using custom focus points:', focusPoints);
-      
-      // วิเคราะห์มุมสำหรับแต่ละจุดเป้าหมาย
-      const results = focusPoints.map(focusPoint => 
-        analyzeAngleForFocusPoint(poseLandmarks, focusPoint)
-      ).filter(result => result !== null);
-      
-      // เลือกผลลัพธ์แรกที่มีค่า
-      if (results.length > 0) {
-        result = results[0];
-        console.log(`Angle for ${result.name}: ${result.angle}°, conditions met: ${result.conditionsMet}`);
-      }
-    } 
-    // ถ้าไม่มี focusPoints ที่กำหนดไว้ ใช้วิธีดีฟอลต์ (ข้อศอก)
-    else {
-      console.log('Using default elbow focus points');
-      
-      // คำนวณมุมข้อศอกซ้าย (ไหล่, ข้อศอก, ข้อมือ)
-      const leftShoulderLandmark = poseLandmarks[11]; // Left shoulder
-      const leftElbowLandmark = poseLandmarks[13];    // Left elbow
-      const leftWristLandmark = poseLandmarks[15];    // Left wrist
-      
-      const leftElbowAngle = calculateAngle(
-        leftShoulderLandmark, 
-        leftElbowLandmark, 
-        leftWristLandmark
-      );
-      
-      // คำนวณมุมข้อศอกขวา (ไหล่, ข้อศอก, ข้อมือ)
-      const rightShoulderLandmark = poseLandmarks[12]; // Right shoulder
-      const rightElbowLandmark = poseLandmarks[14];    // Right elbow
-      const rightWristLandmark = poseLandmarks[16];    // Right wrist
-      
-      const rightElbowAngle = calculateAngle(
-        rightShoulderLandmark, 
-        rightElbowLandmark, 
-        rightWristLandmark
-      );
-      
-      // ใช้มุมใดมุมหนึ่งที่มีค่า
-      let angle = leftElbowAngle || rightElbowAngle;
-      let conditionsMet = false;
-      
-      // ตรวจสอบเงื่อนไขตาม tracking configuration
-      if (trackingConfig.condTrue === ">" && angle > trackingConfig.angleTrue) {
-        conditionsMet = true;
-      } else if (trackingConfig.condTrue === "<" && angle < trackingConfig.angleTrue) {
-        conditionsMet = true;
-      }
-      
-      result = {
-        angle,
-        conditionsMet,
-        name: 'elbow',
-        pointIndices: leftElbowAngle ? [11, 13, 15] : [12, 14, 16]
-      };
-      
-      console.log(`Default elbow angle: ${result.angle}°, conditions met: ${result.conditionsMet}`);
-    }
-    
-    // ถ้าไม่มีผลลัพธ์ ส่งค่าดีฟอลต์
-    if (!result) {
-      console.warn('No valid angle could be calculated');
-      return {
-        conditionsMet: false,
-        angle: 0,
-        threshold: trackingConfig.angleTrue
-      };
-    }
-    
-    // ส่งผลลัพธ์ไปยัง React Native
-    if (window.ReactNativeWebView) {
-      window.ReactNativeWebView.postMessage(JSON.stringify({
-        type: 'TRACKING_RESULT',
-        data: {
-          conditionsMet: result.conditionsMet,
-          angle: result.angle,
-          threshold: trackingConfig.angleTrue,
-          name: result.name,
-          pointIndices: result.pointIndices
-        }
-      }));
-    }
-    
-    // ส่งข้อมูล pose ดิบไปยัง React Native (สำหรับการประมวลผลเพิ่มเติม)
-    if (window.ReactNativeWebView) {
-      window.ReactNativeWebView.postMessage(JSON.stringify({
-        type: 'POSE_DATA',
-        data: poseLandmarks
-      }));
-    }
-    
-    return result.conditionsMet;
-  };
   
   // Initialize pose detection
   const initializePose = async () => {
@@ -307,6 +126,9 @@ function App() {
           resizeCanvas();
         }
         
+        // ไม่ประมวลผลถ้าอยู่ในสถานะหยุดชั่วคราว
+        if (isPaused) return;
+        
         // Clear canvas
         ctx.save();
         ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -327,8 +149,13 @@ function App() {
           // Update pose data state
           setPoseData(results.poseLandmarks);
           
-          // Check tracking conditions
-          checkTrackingConditions(results.poseLandmarks);
+          // ส่งข้อมูลไปยัง React Native (ส่งเฉพาะข้อมูลจุด)
+          if (window.ReactNativeWebView) {
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'POSE_DATA',
+              data: results.poseLandmarks
+            }));
+          }
           
           // ถ้ามี focusPoints ให้วาดเส้นที่เชื่อมต่อระหว่างจุดด้วยสีที่เด่นชัด
           if (focusPoints && focusPoints.length > 0) {
@@ -409,18 +236,11 @@ function App() {
         try {
           const message = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
           
-          if (message.type === 'SET_TRACKING') {
-            console.log('Received tracking config from React Native:', message.data);
+          if (message.type === 'SET_FOCUS_POINTS') {
+            console.log('Received focus points from React Native:', message.data);
             
-            // อัพเดท tracking configuration
-            setTrackingConfig(prev => ({
-              ...prev,
-              ...message.data
-            }));
-            
-            // ถ้ามี focusPoints ให้อัพเดท
+            // อัพเดทจุดเป้าหมายสำหรับการแสดงผล
             if (message.data.focusPoints && Array.isArray(message.data.focusPoints)) {
-              console.log('Updating focus points:', message.data.focusPoints);
               setFocusPoints(message.data.focusPoints);
             }
           } else if (message.type === 'START_CAMERA') {
@@ -430,18 +250,12 @@ function App() {
             camera.stop().catch(e => console.error('Error stopping camera:', e));
           } else if (message.type === 'PAUSE_TRACKING') {
             console.log('Received PAUSE_TRACKING command:', message.pause);
+            setIsPaused(!!message.pause);
           }
         } catch (e) {
           console.error('Error handling message from React Native:', e);
         }
       });
-      
-      // แจ้ง React Native ว่าพร้อมแล้ว
-      if (window.ReactNativeWebView) {
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'WEBVIEW_LOADED'
-        }));
-      }
       
     } catch (error) {
       console.error('Error initializing pose detection:', error);
